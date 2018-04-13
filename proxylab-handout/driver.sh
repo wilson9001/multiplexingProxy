@@ -271,7 +271,7 @@ proxy_pid=$!
 wait_for_port_use "${proxy_port}"
 
 num_threads_pre=`ps --no-headers -Lo lwp --pid $proxy_pid | sort -u | wc -l`
-num_processes_pre=`ps --no-headers -o pid --pid $proxy_pid | sort -u | wc -l`
+num_processes_pre=`ps --no-headers -o pid --pid $proxy_pid --ppid $proxy_pid | sort -u | wc -l`
 
 # Now do the test by fetching some text and binary files directly from
 # Tiny and via the proxy, and then comparing the results.
@@ -450,8 +450,13 @@ for i in {1..10}; do
     download_proxy $PROXY_DIR "`filesystem_friendly ${FETCH_FILE}`-$i" "http://localhost:${tiny_port}/${FETCH_FILE}?$i" "http://localhost:${proxy_port}" &
     bgjobs="$! $bgjobs"
 done
+# Give proxy a chance to connect to the server for each client
+sleep 3
 num_threads_realtime=`ps --no-headers -Lo lwp --pid $proxy_pid | sort -u | wc -l`
 num_processes_realtime=`ps --no-headers -o pid --pid $proxy_pid | sort -u | wc -l`
+fd_output=`lsof -p $proxy_pid +f g | awk '$4 ~ /^[0-9]/ { print $0 }' 2>/dev/null`
+fd_output_proxy_port=$proxy_port
+fd_output_tiny_port=$tiny_port
 
 wait $bgjobs
 
@@ -595,6 +600,42 @@ if [ $num_processes_realtime -gt $num_processes_pre ]; then
 	echo "    Processes are being forked on the fly: $num_processes_realtime > $num_processes_pre"
 else
 	echo "    Processes are *not* being forked on the fly"
+fi
+
+#####
+# Sockets and file descriptors
+#
+echo ""
+echo "*** Sockets and file descriptors ***"
+
+if echo -e "$fd_output" | awk '{ print $10 }' | grep -q eventpoll; then
+	echo "    Active epoll file descriptor detected"
+else
+	echo "    No active epoll file descriptor detected"
+fi
+listenfd_flags=`echo -e "$fd_output" | awk '$9 == "TCP" && $10 ~ /:'$fd_output_proxy_port'$/ && $11 ~ /LISTEN/ { print $6 }'`
+if [ -z "$listenfd_flags" ]; then
+	echo "    Listening file descriptor could not be detected."
+elif echo -e "$listenfd_flags" | grep -vq 'NB\|ND'; then
+	echo "    Listening file descriptor is *not* configured as non-blocking"
+else
+	echo "    Listening file descriptor is configured as non-blocking"
+fi
+clientfd_flags=`echo -e "$fd_output" | awk '$9 == "TCP" && $10 ~/:'$fd_output_proxy_port'(->|$)/ { print $6 }'`
+if [ -z "$clientfd_flags" ]; then
+	echo "    Client file descriptors could not be detected."
+elif echo -e "$clientfd_flags" | grep -vq 'NB\|ND'; then
+	echo "    Client file descriptors are *not* configured as non-blocking"
+else
+	echo "    Client file descriptors are configured as non-blocking"
+fi
+serverfd_flags=`echo -e "$fd_output" | awk '$9 == "TCP" && $10 ~/:'$fd_output_tiny_port'(->|$)/ { print $6 }'`
+if [ -z "$serverfd_flags" ]; then
+	echo "    Server file descriptors could not be detected."
+elif echo -e "$serverfd_flags" | grep -vq 'NB\|ND'; then
+	echo "    Server file descriptors are *not* configured as non-blocking"
+else
+	echo "    Server file descriptors are configured as non-blocking"
 fi
 
 exit

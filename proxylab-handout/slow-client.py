@@ -23,10 +23,10 @@ def main():
 
     (scheme, netloc, path, params, query, fragment) = urlparse.urlparse(sys.argv[2])
     try:
-        server, port = sys.argv[2].split(':')
-        port = int(serverport)
+        server, port = netloc.split(':')
+        port = int(port)
     except ValueError as ve:
-        server = sys.argv[2]
+        server = netloc
         port = 80
     sleep_time = int(sys.argv[3])
     timeout = int(sys.argv[4])
