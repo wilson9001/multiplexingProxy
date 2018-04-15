@@ -44,7 +44,7 @@ When you have completed all the I/O (reading or writing) for a given state, ther
  
 Hints
 When planning your assignment, it will greatly help you to create a state machine that includes: all of the above client states; and all the different actions that you should include for handling a client (e.g., read from client, open server connection, log request, etc.).  You will need to know under what conditions a client request will transition from one state to another.
-While you might want to use the rio code distributed with with previous proxy labs, please note that it was written for blocking sockets and might not work properly.  If you choose to use it, you it will need to be modified.  However, you can also accomplish what you would like using calls to read() and write().
+While you might want to use the rio code distributed with with previous proxy labs, please note that it was written for blocking sockets and might not work properly.  If you choose to use it, you will need to modify it.  However, you can also accomplish what you would like using calls to read() and write().
 Your code MUST compile and run properly (i.e., as tested by the driver) on the CS lab machines.  Note that you are still welcome to develop in another (Linux) environment (e.g., a virtual machine), but please compile and test on a CS lab machine before submission!
 The log entries must include the URL that was requested by the client.  Other than that, the format is loose.
 Two notes on getaddrinfo():
