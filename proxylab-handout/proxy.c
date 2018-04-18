@@ -5,15 +5,20 @@
 #include <stdio.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <netdb.h>
 #include <string.h>
 #include <stdbool.h>
 #include <time.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
 
 /* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
 
 #define MAXEVENTS 64
+#define BUFMAX 102400
 
 void command(void);
 //int handle_client(int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL, serviceState *state);
@@ -59,12 +64,14 @@ static const char *connectionHeader = "\r\nConnection: close";
 static const char *proxyHeader = "\r\nProxy-Connection: close";
 
 static int currentCacheSize;
+static const int wirelen = 2000;
+
 typedef struct
 {
     int objectSize;
     unsigned long timeLastAccessed;
-    char request[1000];
-    char *data;//[MAX_OBJECT_SIZE];
+    char request[1024];
+    char *data; //[MAX_OBJECT_SIZE];
 } cachentry;
 
 cachentry *cache[MAX_CACHE_SIZE];
@@ -165,9 +172,9 @@ int main(int argc, char **argv)
         //If the result was a timeout (i.e., return value from epoll_wait() is 0), check if a global flag has been set by a handler and, if so, end the loop; otherwise, continue waiting
         if (!n)
         {
-            if ()
+            /*if ()
             {
-            }
+            }*/
         }
         else if (n < 0) //If the result was an error, handle the error appropriately.
         {
@@ -221,11 +228,11 @@ int main(int argc, char **argv)
     fclose(log);
 
     //free cache data
-    for(int i = 0; i < MAX_CACHE_SIZE; i++)
+    for (int i = 0; i < MAX_CACHE_SIZE; i++)
     {
-        if(cache[i])
+        if (cache[i])
         {
-            if(cache[i]->data)
+            if (cache[i]->data)
             {
                 free(cache[i]->data);
             }
@@ -239,7 +246,7 @@ int main(int argc, char **argv)
 //If an event corresponds to the listen socket, you should accept() any and all client connections
 bool handle_new_client(event_action *eventAction /*int listenfd*/)
 {
-    //TODO: rewrite to use event actoin
+    //TODO: rewrite to use event action
     socklen_t clientlen;
     int connfd;
     struct sockaddr_storage clientaddr;
@@ -302,7 +309,7 @@ void freeEventAction(event_action *eventAction)
 {
     close(eventAction->clientfd);
     //free's may need & in front of them...
-    free(eventAction->clientfd >= 0);
+    //free(eventAction->clientfd >= 0);
 
     if (eventAction->serverfd)
     {
@@ -321,7 +328,7 @@ void freeEventAction(event_action *eventAction)
     eventAction = NULL;
 }
 
-//If an event corresponds to the socket associated with a client request (client socket) or the socket associated with a the proxied request to an upstream server (server socket) , you should determine where you are in terms of handling the corresponding client request and begin (or resume) handling it.  You should only read() or write() on said socket if your event indicates that you can, and only until the read() or write() call returns a value less than 0.  In such cases (where a value less than 0 is returned), if errno is EAGAIN or EWOULDBLOCK, then that is an indicator that there is no more data to be read, or (for write) that the file descriptor is no longer available for writing.  See the "Client Request Handling" section for more information.
+//If an event corresponds to the socket associated with a client request (client socket) or the socket associated with the proxied request to an upstream server (server socket) , you should determine where you are in terms of handling the corresponding client request and begin (or resume) handling it.  You should only read() or write() on said socket if your event indicates that you can, and only until the read() or write() call returns a value less than 0.  In such cases (where a value less than 0 is returned), if errno is EAGAIN or EWOULDBLOCK, then that is an indicator that there is no more data to be read, or (for write) that the file descriptor is no longer available for writing.  See the "Client Request Handling" section for more information.
 
 int handle_client(int connfd)
 {
@@ -358,15 +365,374 @@ int handle_client(int connfd)
 //CLREAD: reading from client, until the entire request has been read from the client.
 bool clread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL/*, serviceState *state*/)
 {
+    bool endOfReading = false;
+    int clientfd = eventAction->clientfd;
+    size_t len = 0;
+    char buf[BUFMAX];
+    char tempBuf[BUFMAX];
+    memset(tempBuf, '\0', BUFMAX);
+
+    if (!eventAction->URL)
+    {
+        eventAction->URL = calloc(BUFMAX, sizeof(char));
+    }
+
+    while ((len = recv(clientfd, tempBuf, BUFMAX - eventAction->totalBytesPassed, 0)) > 0)
+    {
+        strcat(buf, tempBuf);
+        eventAction->totalBytesPassed += len;
+        //printf("Received %d bytes\n", len);
+        //send(connfd, buf, len, 0);
+    }
+    if (len == 0)
+    {
+        // EOF received.
+        endOfReading = true;
+    }
+    /*else if (errno == EWOULDBLOCK || errno == EAGAIN)
+    {
+        // no more data to read() for now
+        return false;
+    }
+    else
+    {
+        perror("error reading");
+        return true;
+    }*/
+    //When a return value to read() or write() is less than 0 and errno is EAGAIN or EWOULDBLOCK, it is an indicator that you are done for the moment--but you need to know where you should start next time it's your turn
+    else if (errno != EWOULDBLOCK && errno != EAGAIN)
+    {
+        perror("error reading");
+        return true;
+    }
+
+    strcat(eventAction->URL, tempBuf);
+
+    if (endOfReading)
+    {
+        eventAction->totalDataSize = eventAction->totalBytesPassed;
+        eventAction->totalBytesPassed = 0;
+        size_t n;
+        //log request
+        fprintf(log, "%s", eventAction->URL);
+
+        char *hostname;
+        char portNumber[8];
+        memset(portNumber, '\0', 8);
+
+        char reqWire[wirelen * 2];
+
+        memset(reqWire, '\0', wirelen);
+
+        char headerTestSubstr[6];
+        memcpy(headerTestSubstr, buf, 3);
+        headerTestSubstr[3] = '\0';
+
+        printf("Method: '%s'\n", headerTestSubstr);
+
+        if (strcmp(headerTestSubstr, "GET") && strcmp(headerTestSubstr, "get") && strcmp(headerTestSubstr, "Get"))
+        {
+            //generate bad method response to client
+            /*char *responseMessage = "HTTP/1.0 405 Method Not Allowed\r\n\r\n";
+            printf("405\n");
+            Rio_writen(connfd, responseMessage, strlen(responseMessage));
+
+            Close(connfd);
+            continue;*/
+
+            //TODO: create bad response and send to client
+
+            //return NULL;
+        }
+
+        unsigned int reqBufPos = 4;
+
+        memcpy(headerTestSubstr, &buf[reqBufPos], 5);
+        headerTestSubstr[5] = '\0';
+
+        printf("HTTP protocol: '%s'\n", headerTestSubstr);
+
+        if (strcmp(headerTestSubstr, "http:") && strcmp(headerTestSubstr, "https"))
+        {
+            //generate malformed request response to client
+            /*char *responseMessage = "HTTP/1.0 400 Bad Request\r\n\r\n";
+            printf("400\n");
+
+            Rio_writen(connfd, responseMessage, strlen(responseMessage));
+
+            Close(connfd);
+
+            continue;*/
+
+            //TODO: create bad response and send to client
+            //return NULL;
+        }
+
+        reqBufPos += 7;
+
+        if (!strcmp(headerTestSubstr, "https"))
+        {
+            printf("https detected. Switching to http\n");
+
+            reqBufPos++;
+        }
+
+        unsigned int baseURLlength = 0;
+        unsigned int portSpot = 0;
+        unsigned int baseURLWithPortLength = 0;
+
+        while (buf[reqBufPos + baseURLlength] != '/' && buf[reqBufPos + baseURLlength] != ' ')
+        {
+            if (buf[reqBufPos + baseURLlength] == ':')
+            {
+                portSpot = reqBufPos + baseURLlength;
+            }
+
+            baseURLlength++;
+        }
+
+        baseURLWithPortLength = baseURLlength;
+
+        int portLength = 0;
+
+        if (portSpot)
+        {
+            portLength = (reqBufPos + baseURLlength) - (portSpot + 1);
+
+            memcpy(portNumber, &buf[portSpot + 1], portLength);
+            portNumber[portLength] = '\0';
+
+            printf("Port specified: '%s'\n", portNumber);
+
+            baseURLlength -= (portLength + 1);
+        }
+
+        char baseURL[baseURLlength + 1];
+
+        memcpy(baseURL, &buf[reqBufPos], baseURLlength);
+        baseURL[baseURLlength] = '\0';
+
+        printf("Base URL: '%s'\n", baseURL);
+
+        //begin URI, skipping first / in case the user doesn't put it
+        if (buf[reqBufPos + baseURLWithPortLength] == '/')
+        {
+            reqBufPos += baseURLWithPortLength + 1;
+        }
+        else
+        {
+            reqBufPos += baseURLWithPortLength;
+        }
+        size_t URIlength = 0;
+
+        while (buf[reqBufPos + URIlength] != '\r' && buf[reqBufPos + URIlength + 1] != '\n')
+        {
+            URIlength++;
+        }
+
+        URIlength++;
+
+        char URI[URIlength + 1];
+
+        memcpy(URI, &buf[reqBufPos], URIlength);
+
+        URI[URIlength - 1] = '0';
+        URI[URIlength] = '\0';
+
+        printf("URI: '%s'\n", URI);
+
+        reqBufPos += URIlength + 2; //skip the \r\n, pointing after \n
+
+        //copy headers
+        printf("Initializing request to server...\n");
+
+        char passThroughHeaders[wirelen];
+
+        memset(passThroughHeaders, '\0', wirelen);
+        printf("Request initialized.\n");
+        strcpy(passThroughHeaders, &buf[reqBufPos]);
+        printf("Pass through headers are:\n'%s'\n", passThroughHeaders);
+
+        //determine if required headers are already included
+        char *hostHeaderBegin = strstr(passThroughHeaders, "Host:");
+        char *connectHeaderBegin = strstr(passThroughHeaders, "Connection:");
+        char *proxyConnectHeaderBegin = strstr(passThroughHeaders, "Proxy-Connection:");
+        char *userAgentHeaderBegin = strstr(passThroughHeaders, "User-Agent:");
+
+        //begin assembling request string for server endpoint
+        strcat(reqWire, "GET /");
+
+        strcat(reqWire, URI);
+
+        strcat(reqWire, "\r\n");
+
+        printf("Building request:\n'%s'\n", reqWire);
+
+        if (!hostHeaderBegin)
+        {
+            char hostHeader[200];
+            memset(hostHeader, '\0', 200);
+            strcat(hostHeader, "Host: ");
+            strcat(hostHeader, baseURL);
+            strcat(reqWire, hostHeader);
+            printf("'%s'\n", reqWire);
+        }
+
+        if (!connectHeaderBegin)
+        {
+            strcat(reqWire, connectionHeader);
+            printf("'%s'\n", reqWire);
+        }
+
+        if (!proxyConnectHeaderBegin)
+        {
+            strcat(reqWire, proxyHeader);
+            printf("'%s'\n", reqWire);
+        }
+
+        if (!userAgentHeaderBegin)
+        {
+            strcat(reqWire, user_agent_hdr);
+            printf("'%s'\n", reqWire);
+        }
+
+        strcat(reqWire, passThroughHeaders);
+        strcat(reqWire, "\r\n\r\n");
+
+        printf("'%s'\n", reqWire);
+
+        hostname = baseURL;
+
+        if (!portSpot)
+        {
+            strcat(portNumber, "80");
+        }
+
+        printf("Port number just before openfd: %s\n", portNumber);
+
+        char buf2[BUFMAX];
+        bool inCache = false;
+
+        //When you receive an HTTP request from a client, you will first want to check the cache for the resource corresponding to that URL requested.
+        for (int i = 0; i < MAX_CACHE_SIZE; i++)
+        {
+            if (cache[i])
+            {
+                if (!strcmp(cache[i]->request, reqWire))
+                {
+                    inCache = true;
+                    printf("Item found in cache\n");
+                    strcpy(buf2, cache[i]->data); //This will need to be fixed to run to client from here.
+                    n = cache[i]->objectSize;
+                    cache[i]->timeLastAccessed = (unsigned long)time(NULL);
+                    break;
+                }
+            }
+        }
+
+        //change dataBuff and MAXDATA to cache entries, set bytesSent to 0, change callback function to write to client. change event in epoll to watch for writing and return false.
+        if (inCache)
+        {
+            eventAction->dataBuf = malloc(sizeof(char) * n);
+            strcpy(eventAction->dataBuf, buf2);
+            eventAction->totalDataSize = n;
+            free(eventAction->URL);
+            eventAction->URL = NULL;
+            eventAction->callback = clrwrite;
+
+            struct epoll_event event;
+            event.data.ptr = eventAction;
+            // add event to epoll file descriptor
+            event.events = EPOLLOUT | EPOLLET; //Write mode, use edge-triggered monitoring
+            if (epoll_ctl(efd, EPOLL_CTL_MOD, clientfd, &event) < 0)
+            {
+                fprintf(stderr, "error adding event\n");
+                //exit(1);
+                return true;
+            }
+        }
+        //If the URL you have requested is not in the cache, then your proxy will need to retrieve it from the upstream server.
+        //ADD URL to eventActionStruct, Set bytes passed to 0. create nonblocking server socket and add epoll watch on new server socket. change callback to write to server. Remove read watch on client from epoll and return false;
+        else
+        {
+            int clientfd, rc;
+            struct addrinfo hints, *listp, *p;
+
+            /* Get a list of potential server addresses */
+            memset(&hints, 0, sizeof(struct addrinfo));
+            hints.ai_socktype = SOCK_STREAM; /* Open a connection */
+            hints.ai_flags = AI_NUMERICSERV; /* ... using a numeric port arg. */
+            hints.ai_flags |= AI_ADDRCONFIG; /* Recommended for connections */
+
+            if ((rc = getaddrinfo(hostname, port, &hints, &listp)) != 0)
+            {
+                fprintf(stderr, "getaddrinfo failed (%s:%s): %s\n", hostname, port, gai_strerror(rc));
+                return -2;
+            }
+
+            /* Walk the list for one that we can successfully connect to */
+            for (p = listp; p; p = p->ai_next)
+            {
+                /* Create a socket descriptor */
+                if ((clientfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) < 0)
+                    continue; /* Socket failed, try the next */
+
+                /* Connect to the server */
+                if (connect(clientfd, p->ai_addr, p->ai_addrlen) != -1)
+                    break; /* Success */
+                if (close(clientfd) < 0)
+                { /* Connect failed, try another */ //line:netp:openclientfd:closefd
+                    fprintf(stderr, "open_clientfd: close failed: %s\n", strerror(errno));
+                    return -1;
+                }
+            }
+
+            /* Clean up */
+            freeaddrinfo(listp);
+            if (!p) /* All connects failed */
+            {
+                return -1;
+            }
+
+            //make new socket non-blocking
+            if (fcntl(clientfd, F_SETFL, fcntl(clientfd, F_GETFL, 0) | O_NONBLOCK) < 0)
+            {
+                fprintf(stderr, "error setting socket option\n");
+                //exit(1);
+
+                //TODO: create error message and send that.
+                return false;
+            }
+
+            eventAction->serverfd = clientfd;
+            eventAction->callback = srvwrite;
+            eventAction->dataBuf = malloc(sizeof(char) * strlen(reqWire));
+
+            strcpy(eventAction->dataBuf, reqWire);
+
+            struct epoll_event event;
+            event.data.ptr = eventAction;
+            // add event to epoll file descriptor
+            event.events = EPOLLOUT | EPOLLET; //Write mode, use edge-triggered monitoring
+
+            if (epoll_ctl(efd, EPOLL_CTL_ADD, clientfd, &event) < 0)
+            {
+                fprintf(stderr, "error adding event\n");
+                //TODO: create error message
+                //exit(1);
+                return true;
+            }
+            //remove client from watchlist for now...
+            if (epoll_ctl(efd, EPOLL_CTL_DEL, eventAction->clientfd, NULL) < 0)
+            {
+                fprintf(stderr, "error removing event\n");
+                //exit(1);
+                return true;
+            }
+        }
+    }
+
     //With I/O multiplexing and non-blocking I/O, you can't loop until you receive (or send) everything; you have to stop when you get an value less than 0 and finish handling the other ready events, after which you will return to the epoll_wait() loop to see if it is ready for more I/O.
-    //When a return value to read() or write() is less than 0 and errno is EAGAIN or EWOULDBLOCK, it is a an indicator that you are done for the moment--but you need to know where you should start next time it's your turn (see man pages for accept and read, and search for blocking).
-    //Initialize dataBuff and MAXDATA to be able to recieve a URL request and read into buffer
-
-    //Just as with the previous parts of the proxy lab, when you receive an HTTP request from a client, you will first want to check the cache for the resource corresponding to that URL requested.  If it exists, then you can send the resource back to the client.
-    //change dataBuff and MAXDATA to cache entries, set bytesSent to 0, change callback function to write to client. change event in epoll to watch for writing and return false.
-
-    //If the URL you have requested is not in the cache, then (just as before) your proxy will need to retrieve it from the upstream server.
-    //ADD URL to eventActionStruct, Set bytes passed to 0. create nonblocking server socket and add epoll watch on new server socket. change callback to write to server. Remove read watch on client from epoll and return false;
 
     // The difference is that the socket you set up for communication with the server must now be set to non-blocking, just as the listening socket and the client socket are.  And you must register this socket with the epoll instance, for writing, using edge-triggered monitoring.  You can execute connect() immediately, but you cannot initiate the write() call until epoll_wait() indicates that this socket is ready for writing; because the socket is non-blocking, connect() will return before the connection is actually set up. As mentioned earlier, this time you cannot simply begin sending back over the socket; you must wait until the call to epoll_wait() indicates that the socket is available for writing.
 
@@ -375,28 +741,286 @@ bool clread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *to
 
 bool srvwrite(event_action *eventAction /*int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL/*, serviceState *state*/)
 {
+    int nwritten;
+
     //With I/O multiplexing and non-blocking I/O, you can't loop until you receive (or send) everything; you have to stop when you get an value less than 0 and finish handling the other ready events, after which you will return to the epoll_wait() loop to see if it is ready for more I/O.
     //When a return value to read() or write() is less than 0 and errno is EAGAIN or EWOULDBLOCK, it is a an indicator that you are done for the moment--but you need to know where you should start next time it's your turn (see man pages for accept and read, and search for blocking).
     //write to server from offset in dataBuf noted by totalPassed and add bytes Sent to total passed. If total passed = total data size, reset buf, maxsize and bytespassed in preparation to recieve data from upstream server. remove old epoll event and add reading epoll event. change callback to read from server
+    /*if ((nwritten = write(eventAction->serverfd, eventAction->dataBuf[eventAction->totalBytesPassed], eventAction->totalDataSize - eventAction->totalBytesPassed)) <= 0)
+    {
+        if (errno == EINTR) /* Interrupted by sig handler return */
+       /* {
+            nwritten = 0;
+        } /* and call write() again */
+       /* else
+        {
+            //TODO: insert error message here and return to client.
+        }
+        //return -1;       /* errno set by write() */
+   /* }*/
+
+   while((nwritten = write(eventAction->serverfd, eventAction->dataBuf[eventAction->totalBytesPassed], eventAction->totalDataSize - eventAction->totalBytesPassed)) > 0)
+   {
+       eventAction->totalBytesPassed += nwritten;
+   }
+
+    //eventAction->totalBytesPassed += nwritten;
+
+    if (eventAction->totalBytesPassed == eventAction->totalDataSize)
+    {
+        free(eventAction->dataBuf);
+        eventAction->dataBuf = NULL;
+        eventAction->totalDataSize = 0;
+        eventAction->totalBytesPassed = 0;
+        eventAction->callback = clwrite;
+
+        struct epoll_event event;
+        event.data.ptr = eventAction;
+        // add event to epoll file descriptor
+        event.events = EPOLLIN | EPOLLET; //read mode, use edge-triggered monitoring
+
+        if (epoll_ctl(efd, EPOLL_CTL_MOD, eventAction->serverfd, &event) < 0)
+        {
+            fprintf(stderr, "error adding event\n");
+            //TODO: create error message
+            //exit(1);
+            return true;
+        }
+    }
+
+    else if (errno != EWOULDBLOCK && errno != EAGAIN)
+    {
+        perror("error reading");
+        //TODO: create error mesage and return
+        return true;
+    }
 
     return false;
 }
 
 bool srvread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL/*, serviceState *state*/)
 {
+    size_t len;
+    char buf[MAXBUF], tempBuf[MAXBUF];
+    memset(buf, '\0', MAXBUF);
+    bool endOfReading = false;
+
     //With I/O multiplexing and non-blocking I/O, you can't loop until you receive (or send) everything; you have to stop when you get an value less than 0 and finish handling the other ready events, after which you will return to the epoll_wait() loop to see if it is ready for more I/O.
     //When a return value to read() or write() is less than 0 and errno is EAGAIN or EWOULDBLOCK, it is a an indicator that you are done for the moment--but you need to know where you should start next time it's your turn (see man pages for accept and read, and search for blocking).
     //read data from socket into buffer at the offset marked by bytespassed. add size of bytesread into total passed. if bytes read = 0 then prep for client writing/ else if flags would block are set then return. else there was an error and you should change buffer and associated data to have an error message and proceed to prep for client writing/
+    if (!eventAction->dataBuf)
+    {
+        eventAction->dataBuf = malloc(sizeof(char) * BUFMAX);
+    }
 
+    while ((len = recv(eventAction->serverfd, tempBuf, BUFMAX - eventAction->totalBytesPassed, 0)) > 0)
+    {
+        strcat(buf, tempBuf);
+        eventAction->totalBytesPassed += len;
+        //printf("Received %d bytes\n", len);
+        //send(connfd, buf, len, 0);
+    }
+    if (len == 0)
+    {
+        // EOF received.
+        endOfReading = true;
+    }
+    /*else if (errno == EWOULDBLOCK || errno == EAGAIN)
+    {
+        // no more data to read() for now
+        return false;
+    }
+    else
+    {
+        perror("error reading");
+        return true;
+    }*/
+    //When a return value to read() or write() is less than 0 and errno is EAGAIN or EWOULDBLOCK, it is an indicator that you are done for the moment--but you need to know where you should start next time it's your turn
+    else if (errno != EWOULDBLOCK && errno != EAGAIN)
+    {
+        perror("error reading");
+        //TODO: create error mesage and return
+        return true;
+    }
+
+    strcat(eventAction->dataBuf, buf);
+
+    if (endOfReading)
+    {
+        close(eventAction->serverfd);
+        eventAction->serverfd = -1;
+        eventAction->totalDataSize = eventAction->totalBytesPassed;
+        eventAction->totalBytesPassed = 0;
+
+        eventAction->callback = clwrite;
+
+        struct epoll_event event;
+        event.data.ptr = eventAction;
+        // add event to epoll file descriptor
+        event.events = EPOLLOUT | EPOLLET; //read mode, use edge-triggered monitoring
+
+        if (epoll_ctl(efd, EPOLL_CTL_ADD, eventAction->clientfd, &event) < 0)
+        {
+            fprintf(stderr, "error adding event\n");
+            //exit(1);
+            return true;
+        }
+
+        //write to cache
+        if (eventAction->URL)
+        {
+            if (eventAction->totalDataSize <= MAX_OBJECT_SIZE)
+            //create new entry
+            {
+                for (int i = 0; i < MAX_CACHE_SIZE; i++)
+                {
+                    if (!cache[i])
+                    {
+                        cache[i] = malloc(sizeof(cachentry));
+                        //cache[i] = cachentry;
+
+                        strcpy(cache[i]->data, eventAction->dataBuf);
+                        cache[i]->objectSize = eventAction->totalDataSize;
+                        strcpy(cache[i]->request, eventAction->URL);
+                        cache[i]->timeLastAccessed = (unsigned long)time(NULL);
+                        currentCacheSize += cache[i]->objectSize;
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                //Remove oldest entry from cache and then keep removing until there is enough space
+                int lastCache = 0;
+
+                while (!cache[lastCache])
+                {
+                    lastCache++;
+                }
+
+                unsigned long oldestDateTime = cache[lastCache]->timeLastAccessed;
+
+                for (int i = 0; i < MAX_CACHE_SIZE; i++)
+                {
+                    if (cache[i])
+                    {
+                        if (cache[i]->timeLastAccessed < oldestDateTime)
+                        {
+                            lastCache = i;
+                            oldestDateTime = cache[i]->timeLastAccessed;
+                        }
+                    }
+                    /*if (!cache[i].objectSize)
+                        {
+                            continue;
+                        }
+                        if (cache[i].timeLastAccessed < oldestDateTime)
+                        {
+                            lastCache = i;
+                            oldestDateTime = cache[i].timeLastAccessed;
+                        }*/
+                }
+
+                memset(&cache[lastCache]->data, '\0', MAX_OBJECT_SIZE);
+                memset(&cache[lastCache]->request, '\0', wirelen);
+                currentCacheSize -= cache[lastCache]->objectSize;
+
+                strcpy(cache[lastCache]->data, eventAction->dataBuf);
+                cache[lastCache]->objectSize = eventAction->totalDataSize;
+                strcpy(cache[lastCache]->request, eventAction->URL);
+                cache[lastCache]->timeLastAccessed = (unsigned long)time(NULL);
+                currentCacheSize += cache[lastCache]->objectSize;
+
+                if (currentCacheSize > MAX_CACHE_SIZE)
+                {
+                    while (currentCacheSize > MAX_CACHE_SIZE)
+                    {
+                        lastCache = 0;
+
+                        while (!cache[lastCache])
+                        {
+                            lastCache++;
+                        }
+
+                        oldestDateTime = cache[lastCache]->timeLastAccessed;
+
+                        for (int i = 0; i < MAX_CACHE_SIZE; i++)
+                        {
+                            if (cache[i])
+                            {
+                                if (cache[i]->timeLastAccessed < oldestDateTime)
+                                {
+                                    lastCache = i;
+                                    oldestDateTime = cache[i]->timeLastAccessed;
+                                }
+                            }
+                            /*if (!cache[i].objectSize)
+                                {
+                                    continue;
+                                }
+                                if (cache[i].timeLastAccessed < oldestDateTime)
+                                {
+                                    lastCache = i;
+                                    oldestDateTime = cache[i].timeLastAccessed;
+                                }*/
+                        }
+
+                        /*memset(&cache[lastCache].data, '\0', MAX_OBJECT_SIZE);
+                            memset(&cache[lastCache].request, '\0', wirelen);
+                            cache[lastCache].timeLastAccessed = 0;*/
+                        currentCacheSize -= cache[lastCache]->objectSize;
+                        //cache[lastCache].objectSize = 0;
+                        free(&cache[lastCache]);
+                    }
+                }
+            }
+        }
+    }
     //to prep for client writing: close file descriptor, free data and set pointer to null. add listeining event to epoll for client fd. if event has URL and is not an error message then write to cache. change callback to write to client.
     return false;
 }
 
-bool clrwrite(event_action *eventAction /*int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL/*, serviceState *state*/)
+bool clwrite(event_action *eventAction /*int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL/*, serviceState *state*/)
 {
+    size_t nwritten;
     //With I/O multiplexing and non-blocking I/O, you can't loop until you receive (or send) everything; you have to stop when you get an value less than 0 and finish handling the other ready events, after which you will return to the epoll_wait() loop to see if it is ready for more I/O.
     //When a return value to read() or write() is less than 0 and errno is EAGAIN or EWOULDBLOCK, it is a an indicator that you are done for the moment--but you need to know where you should start next time it's your turn (see man pages for accept and read, and search for blocking).
+    /*if ((nwritten = write(eventAction->clientfd, eventAction->dataBuf[eventAction->totalBytesPassed], eventAction->totalDataSize - eventAction->totalBytesPassed)) <= 0)
+    {
+        if (errno == EINTR) /* Interrupted by sig handler return */
+        /*{
+            nwritten = 0;
+        } /* and call write() again */
+        /*else
+        {
+            //TODO: insert error message here and return to client.
+        }
+        //return -1;       /* errno set by write() */
+    //}
+    while((nwritten = write(eventAction->clientfd, eventAction->dataBuf[eventAction->totalBytesPassed], eventAction->totalDataSize- eventAction->totalBytesPassed)) > 0)
+    {
+        eventAction->totalBytesPassed += nwritten;
+    }
 
+    if(eventAction->totalBytesPassed == eventAction->totalDataSize)
+    {
+        return true;
+    }
+
+    else if (errno != EWOULDBLOCK && errno != EAGAIN)
+    {
+        perror("error reading");
+        //TODO: create error mesage and return
+        return true;
+    }
+
+    return false;
+    /*eventAction->totalBytesPassed += nwritten;
+
+    if (eventAction->totalBytesPassed = eventAction->totalDataSize)
+    {
+        return true;
+    }
     //write to socket from buffer at the offset specified by bytes passed. Add amount sent to bytes passed. if bytes sent = total datasize, return true. if sent results in error, return true. otherwise writing is not done, return false;
-    return true;
+    return false;*/
 }
