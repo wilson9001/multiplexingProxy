@@ -4,3 +4,7 @@ epoll-nonblock.c
 epoll.c
 select.c
 .gitignore.swp
+proxy.o
+proxy
+csapp.o
+settings.json

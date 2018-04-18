@@ -12,6 +12,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <ctype.h>
 
 /* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
@@ -23,14 +24,14 @@
 void command(void);
 //int handle_client(int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL, serviceState *state);
 
-typedef struct
+typedef struct event_action
 {
-    int (*callback)(event_action * /*int, int, size_t, size_t, unsigned char *, char * /*, serviceState **/);
+    bool (*callback)(struct event_action * /*int, int, size_t, size_t, unsigned char *, char *, serviceState **/);
     int clientfd;
     int serverfd;
     size_t totalBytesPassed;
     size_t totalDataSize;
-    unsigned char *dataBuf;
+    char *dataBuf;
     char *URL;
     //serviceState *state;
 } event_action;
@@ -52,7 +53,7 @@ bool handle_new_client(event_action *eventAction);
 bool clread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL, serviceState *state*/);
 bool srvwrite(event_action *eventAction /*int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL, serviceState *state*/);
 bool srvread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL, serviceState *state*/);
-bool clrwrite(event_action *eventAction /*int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL, serviceState *state*/);
+bool clwrite(event_action *eventAction /*int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL, serviceState *state*/);
 
 void freeEventAction(event_action *);
 
@@ -76,23 +77,18 @@ typedef struct
 
 cachentry *cache[MAX_CACHE_SIZE];
 
-FILE *log;
+FILE *Log;
 
 int main(int argc, char **argv)
 {
-    int listenfd, connfd;
-    socklen_t clientlen;
-    struct sockaddr_storage clientaddr;
     struct epoll_event event;
     struct epoll_event *events;
     int i;
-    int len;
-    int *argptr;
+    
     event_action *eventAction;
 
     size_t n;
-    char buf[MAXLINE];
-
+    
     if (argc != 2)
     {
         fprintf(stderr, "usage: %s <port>\n", argv[0]);
@@ -107,7 +103,7 @@ int main(int argc, char **argv)
     }
 
     //Set up listen socket.
-    listenfd = Open_listenfd(argv[1]);
+    int listenfd = Open_listenfd(argv[1]);
 
     // set fd to non-blocking (set flags while keeping existing flags)
     if (fcntl(listenfd, F_SETFL, fcntl(listenfd, F_GETFL, 0) | O_NONBLOCK) < 0)
@@ -118,9 +114,9 @@ int main(int argc, char **argv)
 
     //Set up event action to associate with listenfd
     eventAction = malloc(sizeof(event_action));
-    eventAction->callback = handle_new_client;
-    int *clientfd = malloc(sizeof(int));
-    *clientfd = listenfd;
+    eventAction->callback = handle_new_client;//this may need & in front of it?
+    
+    int clientfd = listenfd;
     //For the listening file descriptor the clientfd will be used to accept connections.
     eventAction->clientfd = clientfd;
     eventAction->serverfd = -1;
@@ -142,15 +138,15 @@ int main(int argc, char **argv)
     //Buffer where events are returned
     events = calloc(MAXEVENTS, sizeof(event));
 
-    //Open your log file.
-    log = fopen("proxyLog.txt", "a");
-    if (!log)
+    //Open your Log file.
+    Log = fopen("proxyLog.txt", "a");
+    if (!Log)
     {
         fprintf(stderr, "Log file failed to initialize!\n");
         exit(EXIT_FAILURE);
     }
 
-    printf(log, "--- Begin Proxy Session at UNIX Time %ld ---", time(NULL));
+    fprintf(Log, "--- Begin Proxy Session at UNIX Time %ld ---", time(NULL));
 
     //Initialize cache.
     for (int i = 0; i < MAX_CACHE_SIZE; i++)
@@ -209,7 +205,7 @@ int main(int argc, char **argv)
                 }
 
                 //rewrite this to handle state transitions
-                else if (eventAction->callback(eventAction /*&eventAction->clientfd, &eventAction->serverfd, &eventAction->totalBytesPassed, &eventAction->totalDataSize, &eventAction->dataBuf, &eventAction->URL/*, &eventAction->state*/))
+                else if (eventAction->callback(eventAction /*&eventAction->clientfd, &eventAction->serverfd, &eventAction->totalBytesPassed, &eventAction->totalDataSize, &eventAction->dataBuf, &eventAction->URL, &eventAction->state*/))
                 {
                     //free event action struct memory
                     freeEventAction(eventAction);
@@ -224,8 +220,8 @@ int main(int argc, char **argv)
     //iterate through events and free?
     free(events);
 
-    //close log.
-    fclose(log);
+    //close Log.
+    fclose(Log);
 
     //free cache data
     for (int i = 0; i < MAX_CACHE_SIZE; i++)
@@ -251,8 +247,8 @@ bool handle_new_client(event_action *eventAction /*int listenfd*/)
     int connfd;
     struct sockaddr_storage clientaddr;
     struct epoll_event event;
-    int *argptr;
-    struct event_action *eventAction;
+    
+    event_action *eventActionForClient;
 
     clientlen = sizeof(struct sockaddr_storage);
 
@@ -268,26 +264,26 @@ bool handle_new_client(event_action *eventAction /*int listenfd*/)
             return false;
         }
 
-        eventAction = malloc(sizeof(event_action));
+        eventActionForClient = malloc(sizeof(event_action));
         //TODO: change this to state 1 handler after state 1 handler is created.
-        eventAction->callback = clread;
-        int *clientfd = malloc(sizeof(int));
-        *clientfd = connfd;
-        eventAction->clientfd = clientfd;
-        eventAction->serverfd = NULL;
-        eventAction->totalBytesPassed = 0;
-        eventAction->totalDataSize = 0;
-        eventAction->dataBuf = NULL;
-        eventAction->URL = NULL;
+        eventActionForClient->callback = clread;
+        
+        int clientfd = connfd;
+        eventActionForClient->clientfd = clientfd;
+        eventActionForClient->serverfd = -1;
+        eventActionForClient->totalBytesPassed = 0;
+        eventActionForClient->totalDataSize = 0;
+        eventActionForClient->dataBuf = NULL;
+        eventActionForClient->URL = NULL;
         //eventAction->serviceState = CLREAD;
 
-        event.data.ptr = eventAction;
+        event.data.ptr = eventActionForClient;
         // add event to epoll file descriptor
         event.events = EPOLLIN | EPOLLET; //Read mode, use edge-triggered monitoring
         if (epoll_ctl(efd, EPOLL_CTL_ADD, connfd, &event) < 0)
         {
             fprintf(stderr, "error adding event\n");
-            freeEventAction(&eventAction);
+            freeEventAction(eventActionForClient);
             //exit(1);
             return false;
         }
@@ -360,10 +356,10 @@ int handle_client(int connfd)
 
 //For example, you'll need to associate with the request: the file descriptors corresponding to the client socket and the server socket; the request state (see Client Request States); the total number of bytes to read or write for the request or the response; the total number of bytes read or written thus far; the buffer to which you are writing data from a socket or from which you are writing the data to a socket; etc.
 
-//When you have completed all the I/O (reading or writing) for a given state, there are often items not related to socket I/O that you can perform before you move to the next state.  For example, in the READ_REQUEST state, when you have finished reading the entire request, you can immediately log the request, check the cache, and (if not in the cache), set up to the server socket (including making it non-blocking) and call connect().  After all that, then you can transition to the SEND_REQUEST state (or to the SEND_RESPONSE state, in the case the item was cached).  However, as indicated previously, you may not write until the socket becomes ready for writing--that is, until it is returned by epoll_wait() as being write ready.
+//When you have completed all the I/O (reading or writing) for a given state, there are often items not related to socket I/O that you can perform before you move to the next state.  For example, in the READ_REQUEST state, when you have finished reading the entire request, you can immediately Log the request, check the cache, and (if not in the cache), set up to the server socket (including making it non-blocking) and call connect().  After all that, then you can transition to the SEND_REQUEST state (or to the SEND_RESPONSE state, in the case the item was cached).  However, as indicated previously, you may not write until the socket becomes ready for writing--that is, until it is returned by epoll_wait() as being write ready.
 
 //CLREAD: reading from client, until the entire request has been read from the client.
-bool clread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL/*, serviceState *state*/)
+bool clread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL, serviceState *state*/)
 {
     bool endOfReading = false;
     int clientfd = eventAction->clientfd;
@@ -413,8 +409,8 @@ bool clread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *to
         eventAction->totalDataSize = eventAction->totalBytesPassed;
         eventAction->totalBytesPassed = 0;
         size_t n;
-        //log request
-        fprintf(log, "%s", eventAction->URL);
+        //Log request
+        fprintf(Log, "%s", eventAction->URL);
 
         char *hostname;
         char portNumber[8];
@@ -638,7 +634,7 @@ bool clread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *to
             eventAction->totalDataSize = n;
             free(eventAction->URL);
             eventAction->URL = NULL;
-            eventAction->callback = clrwrite;
+            eventAction->callback = clwrite;
 
             struct epoll_event event;
             event.data.ptr = eventAction;
@@ -664,9 +660,9 @@ bool clread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *to
             hints.ai_flags = AI_NUMERICSERV; /* ... using a numeric port arg. */
             hints.ai_flags |= AI_ADDRCONFIG; /* Recommended for connections */
 
-            if ((rc = getaddrinfo(hostname, port, &hints, &listp)) != 0)
+            if ((rc = getaddrinfo(hostname, portNumber, &hints, &listp)) != 0)
             {
-                fprintf(stderr, "getaddrinfo failed (%s:%s): %s\n", hostname, port, gai_strerror(rc));
+                fprintf(stderr, "getaddrinfo failed (%s:%s): %s\n", hostname, portNumber, gai_strerror(rc));
                 return -2;
             }
 
@@ -739,7 +735,7 @@ bool clread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *to
     return false;
 }
 
-bool srvwrite(event_action *eventAction /*int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL/*, serviceState *state*/)
+bool srvwrite(event_action *eventAction /*int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL, serviceState *state*/)
 {
     int nwritten;
 
@@ -748,18 +744,18 @@ bool srvwrite(event_action *eventAction /*int *clientfd, int *serverfd, size_t *
     //write to server from offset in dataBuf noted by totalPassed and add bytes Sent to total passed. If total passed = total data size, reset buf, maxsize and bytespassed in preparation to recieve data from upstream server. remove old epoll event and add reading epoll event. change callback to read from server
     /*if ((nwritten = write(eventAction->serverfd, eventAction->dataBuf[eventAction->totalBytesPassed], eventAction->totalDataSize - eventAction->totalBytesPassed)) <= 0)
     {
-        if (errno == EINTR) /* Interrupted by sig handler return */
+        if (errno == EINTR)  Interrupted by sig handler return */
        /* {
             nwritten = 0;
-        } /* and call write() again */
+        }  and call write() again */
        /* else
         {
             //TODO: insert error message here and return to client.
         }
-        //return -1;       /* errno set by write() */
+        //return -1;        errno set by write() */
    /* }*/
 
-   while((nwritten = write(eventAction->serverfd, eventAction->dataBuf[eventAction->totalBytesPassed], eventAction->totalDataSize - eventAction->totalBytesPassed)) > 0)
+   while((nwritten = write(eventAction->serverfd, &eventAction->dataBuf[eventAction->totalBytesPassed], eventAction->totalDataSize - eventAction->totalBytesPassed)) > 0)
    {
        eventAction->totalBytesPassed += nwritten;
    }
@@ -798,7 +794,7 @@ bool srvwrite(event_action *eventAction /*int *clientfd, int *serverfd, size_t *
     return false;
 }
 
-bool srvread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL/*, serviceState *state*/)
+bool srvread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL, serviceState *state*/)
 {
     size_t len;
     char buf[MAXBUF], tempBuf[MAXBUF];
@@ -980,24 +976,24 @@ bool srvread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *t
     return false;
 }
 
-bool clwrite(event_action *eventAction /*int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL/*, serviceState *state*/)
+bool clwrite(event_action *eventAction /*int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL, serviceState *state*/)
 {
     size_t nwritten;
     //With I/O multiplexing and non-blocking I/O, you can't loop until you receive (or send) everything; you have to stop when you get an value less than 0 and finish handling the other ready events, after which you will return to the epoll_wait() loop to see if it is ready for more I/O.
     //When a return value to read() or write() is less than 0 and errno is EAGAIN or EWOULDBLOCK, it is a an indicator that you are done for the moment--but you need to know where you should start next time it's your turn (see man pages for accept and read, and search for blocking).
     /*if ((nwritten = write(eventAction->clientfd, eventAction->dataBuf[eventAction->totalBytesPassed], eventAction->totalDataSize - eventAction->totalBytesPassed)) <= 0)
     {
-        if (errno == EINTR) /* Interrupted by sig handler return */
+        if (errno == EINTR) Interrupted by sig handler return */
         /*{
             nwritten = 0;
-        } /* and call write() again */
+        } and call write() again */
         /*else
         {
             //TODO: insert error message here and return to client.
         }
-        //return -1;       /* errno set by write() */
+        //return -1;        errno set by write() */
     //}
-    while((nwritten = write(eventAction->clientfd, eventAction->dataBuf[eventAction->totalBytesPassed], eventAction->totalDataSize- eventAction->totalBytesPassed)) > 0)
+    while((nwritten = write(eventAction->clientfd, &eventAction->dataBuf[eventAction->totalBytesPassed], eventAction->totalDataSize- eventAction->totalBytesPassed)) > 0)
     {
         eventAction->totalBytesPassed += nwritten;
     }
