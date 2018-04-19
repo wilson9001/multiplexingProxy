@@ -174,7 +174,7 @@ int main(int argc, char **argv)
         //If the result was a timeout (i.e., return value from epoll_wait() is 0), check if a global flag has been set by a handler and, if so, end the loop; otherwise, continue waiting
         if (!n)
         {
-            printf("No events");
+            //printf("No events");
             /*if ()
             {
             }*/
@@ -415,6 +415,13 @@ bool clread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *to
         } /* EOF */
         strcat(eventAction->URL, tempBuf);
         eventAction->totalBytesPassed += nread;
+
+        if (strstr(tempBuf, "\r\n\r\n"))
+        {
+            endOfReading = true;
+            break;
+        }
+
         nleft -= nread;
     }
 
@@ -432,7 +439,7 @@ bool clread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *to
         strcpy(buf, eventAction->URL);
         printf("Done reading from client\n");
 
-        eventAction->totalDataSize = eventAction->totalBytesPassed;
+        //eventAction->totalDataSize = eventAction->totalBytesPassed;
         eventAction->totalBytesPassed = 0;
         size_t n;
         //Log request
@@ -734,6 +741,7 @@ bool clread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *to
             eventAction->dataBuf = malloc(sizeof(char) * strlen(reqWire));
 
             strcpy(eventAction->dataBuf, reqWire);
+            eventAction->totalDataSize = strlen(reqWire);
 
             struct epoll_event event;
             event.data.ptr = eventAction;
@@ -817,25 +825,24 @@ bool srvwrite(event_action *eventAction /*int *clientfd, int *serverfd, size_t *
             //exit(1);
             return true;
         }*/
-        if(epoll_ctl(efd, EPOLL_CTL_DEL, eventAction->serverfd, NULL))
+        if (epoll_ctl(efd, EPOLL_CTL_DEL, eventAction->serverfd, NULL))
         {
             fprintf(stderr, "error adding event\n");
             //TODO: create error message
             //exit(1);
             return true;
         }
-        if(epoll_ctl(efd, EPOLL_CTL_ADD, eventAction->serverfd, &event))
+        if (epoll_ctl(efd, EPOLL_CTL_ADD, eventAction->serverfd, &event))
         {
             fprintf(stderr, "error adding event\n");
             //TODO: create error message
             //exit(1);
             return true;
         }
-    
-    return false;
-    
+
+        return false;
     }
-    else if(errno != EWOULDBLOCK || errno != EAGAIN)
+    else if (errno != EWOULDBLOCK || errno != EAGAIN)
     {
         perror("error writing");
         //TODO: create error mesage and return
@@ -867,7 +874,7 @@ bool srvread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *t
     //read data from socket into buffer at the offset marked by bytespassed. add size of bytesread into total passed. if bytes read = 0 then prep for client writing/ else if flags would block are set then return. else there was an error and you should change buffer and associated data to have an error message and proceed to prep for client writing/
     if (!eventAction->dataBuf)
     {
-        eventAction->dataBuf = malloc(sizeof(char) * BUFMAX);
+        eventAction->dataBuf = calloc(BUFMAX, sizeof(char));
     }
 
     /*while ((len = recv(eventAction->serverfd, tempBuf, BUFMAX - eventAction->totalBytesPassed, 0)) > 0)
@@ -893,7 +900,7 @@ bool srvread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *t
         return true;
     }*/
     //When a return value to read() or write() is less than 0 and errno is EAGAIN or EWOULDBLOCK, it is an indicator that you are done for the moment--but you need to know where you should start next time it's your turn
-   /* else if (errno != EWOULDBLOCK && errno != EAGAIN)
+    /* else if (errno != EWOULDBLOCK && errno != EAGAIN)
     {
         perror("error reading");
         //TODO: create error mesage and return
@@ -904,6 +911,7 @@ bool srvread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *t
 
     size_t nleft = BUFMAX;
     ssize_t nread;
+    //char last4[4];
 
     while (nleft > 0)
     {
@@ -929,12 +937,22 @@ bool srvread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *t
         } /* EOF */
         strcat(eventAction->dataBuf, tempBuf);
         eventAction->totalBytesPassed += nread;
+
+        if (strstr(tempBuf, "\r\n\r\n"))
+        {
+            endOfReading = true;
+            break;
+        }
+
         nleft -= nread;
     }
 
     if (endOfReading)
     {
+        printf("Data returned is:\n%s\n\n", eventAction->dataBuf);
+        //printf("I think this will break it\n");
         close(eventAction->serverfd);
+        //printf("I was wrong.\n");
         eventAction->serverfd = -1;
         eventAction->totalDataSize = eventAction->totalBytesPassed;
         eventAction->totalBytesPassed = 0;
@@ -954,50 +972,57 @@ bool srvread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *t
         }
 
         //write to cache
-        if (eventAction->URL)
+        /*if (eventAction->URL)
         {
+            printf("POssible to cache...\n");
             if (eventAction->totalDataSize <= MAX_OBJECT_SIZE)
             //create new entry
             {
-                for (int i = 0; i < MAX_CACHE_SIZE; i++)
+                if ((eventAction->totalDataSize + currentCacheSize) < MAX_CACHE_SIZE)
                 {
-                    if (!cache[i])
+                    for (int i = 0; i < MAX_CACHE_SIZE; i++)
                     {
-                        cache[i] = malloc(sizeof(cachentry));
-                        //cache[i] = cachentry;
-
-                        strcpy(cache[i]->data, eventAction->dataBuf);
-                        cache[i]->objectSize = eventAction->totalDataSize;
-                        strcpy(cache[i]->request, eventAction->URL);
-                        cache[i]->timeLastAccessed = (unsigned long)time(NULL);
-                        currentCacheSize += cache[i]->objectSize;
-                        break;
-                    }
-                }
-            }
-            else
-            {
-                //Remove oldest entry from cache and then keep removing until there is enough space
-                int lastCache = 0;
-
-                while (!cache[lastCache])
-                {
-                    lastCache++;
-                }
-
-                unsigned long oldestDateTime = cache[lastCache]->timeLastAccessed;
-
-                for (int i = 0; i < MAX_CACHE_SIZE; i++)
-                {
-                    if (cache[i])
-                    {
-                        if (cache[i]->timeLastAccessed < oldestDateTime)
+                        if (!cache[i])
                         {
-                            lastCache = i;
-                            oldestDateTime = cache[i]->timeLastAccessed;
+                            cache[i] = malloc(sizeof(cachentry));
+                            //cache[i] = cachentry;
+                            printf("Writing to cache...\n");
+                            strcpy(cache[i]->data, eventAction->dataBuf);
+                            printf("Updating objectSize\n");
+                            cache[i]->objectSize = eventAction->totalDataSize;
+                            printf("Copying URL\n");
+                            strcpy(cache[i]->request, eventAction->URL);
+                            printf("Adding timestamp\n");
+                            cache[i]->timeLastAccessed = (unsigned long)time(NULL);
+                            printf("Updating cache size\n");
+                            currentCacheSize += cache[i]->objectSize;
+                            break;
                         }
                     }
-                    /*if (!cache[i].objectSize)
+                }
+                else
+                {
+                    //Remove oldest entry from cache and then keep removing until there is enough space
+                    int lastCache = 0;
+
+                    while (!cache[lastCache])
+                    {
+                        lastCache++;
+                    }
+
+                    unsigned long oldestDateTime = cache[lastCache]->timeLastAccessed;
+
+                    for (int i = 0; i < MAX_CACHE_SIZE; i++)
+                    {
+                        if (cache[i])
+                        {
+                            if (cache[i]->timeLastAccessed < oldestDateTime)
+                            {
+                                lastCache = i;
+                                oldestDateTime = cache[i]->timeLastAccessed;
+                            }
+                        }
+                        if (!cache[i].objectSize)
                         {
                             continue;
                         }
@@ -1006,42 +1031,42 @@ bool srvread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *t
                             lastCache = i;
                             oldestDateTime = cache[i].timeLastAccessed;
                         }*/
-                }
+        /*            }
 
-                memset(&cache[lastCache]->data, '\0', MAX_OBJECT_SIZE);
-                memset(&cache[lastCache]->request, '\0', wirelen);
-                currentCacheSize -= cache[lastCache]->objectSize;
+                    memset(&cache[lastCache]->data, '\0', MAX_OBJECT_SIZE);
+                    memset(&cache[lastCache]->request, '\0', wirelen);
+                    currentCacheSize -= cache[lastCache]->objectSize;
 
-                strcpy(cache[lastCache]->data, eventAction->dataBuf);
-                cache[lastCache]->objectSize = eventAction->totalDataSize;
-                strcpy(cache[lastCache]->request, eventAction->URL);
-                cache[lastCache]->timeLastAccessed = (unsigned long)time(NULL);
-                currentCacheSize += cache[lastCache]->objectSize;
+                    strcpy(cache[lastCache]->data, eventAction->dataBuf);
+                    cache[lastCache]->objectSize = eventAction->totalDataSize;
+                    strcpy(cache[lastCache]->request, eventAction->URL);
+                    cache[lastCache]->timeLastAccessed = (unsigned long)time(NULL);
+                    currentCacheSize += cache[lastCache]->objectSize;
 
-                if (currentCacheSize > MAX_CACHE_SIZE)
-                {
-                    while (currentCacheSize > MAX_CACHE_SIZE)
+                    if (currentCacheSize > MAX_CACHE_SIZE)
                     {
-                        lastCache = 0;
-
-                        while (!cache[lastCache])
+                        while (currentCacheSize > MAX_CACHE_SIZE)
                         {
-                            lastCache++;
-                        }
+                            lastCache = 0;
 
-                        oldestDateTime = cache[lastCache]->timeLastAccessed;
-
-                        for (int i = 0; i < MAX_CACHE_SIZE; i++)
-                        {
-                            if (cache[i])
+                            while (!cache[lastCache])
                             {
-                                if (cache[i]->timeLastAccessed < oldestDateTime)
-                                {
-                                    lastCache = i;
-                                    oldestDateTime = cache[i]->timeLastAccessed;
-                                }
+                                lastCache++;
                             }
-                            /*if (!cache[i].objectSize)
+
+                            oldestDateTime = cache[lastCache]->timeLastAccessed;
+
+                            for (int i = 0; i < MAX_CACHE_SIZE; i++)
+                            {
+                                if (cache[i])
+                                {
+                                    if (cache[i]->timeLastAccessed < oldestDateTime)
+                                    {
+                                        lastCache = i;
+                                        oldestDateTime = cache[i]->timeLastAccessed;
+                                    }
+                                }
+                                if (!cache[i].objectSize)
                                 {
                                     continue;
                                 }
@@ -1050,19 +1075,21 @@ bool srvread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *t
                                     lastCache = i;
                                     oldestDateTime = cache[i].timeLastAccessed;
                                 }*/
-                        }
+        //                    }
 
-                        /*memset(&cache[lastCache].data, '\0', MAX_OBJECT_SIZE);
+                            /*memset(&cache[lastCache].data, '\0', MAX_OBJECT_SIZE);
                             memset(&cache[lastCache].request, '\0', wirelen);
                             cache[lastCache].timeLastAccessed = 0;*/
-                        currentCacheSize -= cache[lastCache]->objectSize;
-                        //cache[lastCache].objectSize = 0;
-                        free(&cache[lastCache]);
+        /*                    currentCacheSize -= cache[lastCache]->objectSize;
+                            //cache[lastCache].objectSize = 0;
+                            free(&cache[lastCache]);
+                        }
                     }
                 }
             }
-        }
+        }*/
     }
+    printf("About to return from srvread\n");
     //to prep for client writing: close file descriptor, free data and set pointer to null. add listeining event to epoll for client fd. if event has URL and is not an error message then write to cache. change callback to write to client.
     return false;
 }
