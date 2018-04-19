@@ -8,3 +8,6 @@ proxy.o
 proxy
 csapp.o
 settings.json
+proxyLog.txt
+.basicTestStart
+tiny

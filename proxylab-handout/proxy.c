@@ -60,7 +60,7 @@ void freeEventAction(event_action *);
 int efd;
 
 /* You won't lose style points for including this long line in your code */
-static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
+static const char *user_agent_hdr = "\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3";
 static const char *connectionHeader = "\r\nConnection: close";
 static const char *proxyHeader = "\r\nProxy-Connection: close";
 
@@ -84,11 +84,11 @@ int main(int argc, char **argv)
     struct epoll_event event;
     struct epoll_event *events;
     int i;
-    
+
     event_action *eventAction;
 
     size_t n;
-    
+
     if (argc != 2)
     {
         fprintf(stderr, "usage: %s <port>\n", argv[0]);
@@ -114,8 +114,8 @@ int main(int argc, char **argv)
 
     //Set up event action to associate with listenfd
     eventAction = malloc(sizeof(event_action));
-    eventAction->callback = handle_new_client;//this may need & in front of it?
-    
+    eventAction->callback = handle_new_client; //this may need & in front of it?
+
     int clientfd = listenfd;
     //For the listening file descriptor the clientfd will be used to accept connections.
     eventAction->clientfd = clientfd;
@@ -162,12 +162,19 @@ int main(int argc, char **argv)
     //Start an epoll_wait() loop.
     while (runProxy)
     {
+        //printf("Waiting for event\n");
         // wait for event to happen with timeout of 1 second
         n = epoll_wait(efd, events, MAXEVENTS, 1);
+
+        if (n)
+        {
+            printf("There are %ld events\n", n);
+        }
 
         //If the result was a timeout (i.e., return value from epoll_wait() is 0), check if a global flag has been set by a handler and, if so, end the loop; otherwise, continue waiting
         if (!n)
         {
+            printf("No events");
             /*if ()
             {
             }*/
@@ -207,9 +214,11 @@ int main(int argc, char **argv)
                 //rewrite this to handle state transitions
                 else if (eventAction->callback(eventAction /*&eventAction->clientfd, &eventAction->serverfd, &eventAction->totalBytesPassed, &eventAction->totalDataSize, &eventAction->dataBuf, &eventAction->URL, &eventAction->state*/))
                 {
+                    printf("connection ended.\n");
                     //free event action struct memory
                     freeEventAction(eventAction);
                 }
+                //printf("New state is ")
             }
         }
     }
@@ -242,12 +251,13 @@ int main(int argc, char **argv)
 //If an event corresponds to the listen socket, you should accept() any and all client connections
 bool handle_new_client(event_action *eventAction /*int listenfd*/)
 {
+    printf("Handling new client\n");
     //TODO: rewrite to use event action
     socklen_t clientlen;
     int connfd;
     struct sockaddr_storage clientaddr;
     struct epoll_event event;
-    
+
     event_action *eventActionForClient;
 
     clientlen = sizeof(struct sockaddr_storage);
@@ -267,7 +277,7 @@ bool handle_new_client(event_action *eventAction /*int listenfd*/)
         eventActionForClient = malloc(sizeof(event_action));
         //TODO: change this to state 1 handler after state 1 handler is created.
         eventActionForClient->callback = clread;
-        
+
         int clientfd = connfd;
         eventActionForClient->clientfd = clientfd;
         eventActionForClient->serverfd = -1;
@@ -363,49 +373,65 @@ bool clread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *to
 {
     bool endOfReading = false;
     int clientfd = eventAction->clientfd;
-    size_t len = 0;
     char buf[BUFMAX];
+
+    memset(buf, '\0', BUFMAX);
     char tempBuf[BUFMAX];
-    memset(tempBuf, '\0', BUFMAX);
+
+    printf("Inside clread with client on fd %d\n", clientfd);
 
     if (!eventAction->URL)
     {
         eventAction->URL = calloc(BUFMAX, sizeof(char));
     }
 
-    while ((len = recv(clientfd, tempBuf, BUFMAX - eventAction->totalBytesPassed, 0)) > 0)
+    printf("About to attempt reading\n");
+
+    //When a return value to read() or write() is less than 0 and errno is EAGAIN or EWOULDBLOCK, it is an indicator that you are done for the moment--but you need to know where you should start next time it's your turn
+    size_t nleft = BUFMAX;
+    ssize_t nread;
+
+    while (nleft > 0)
     {
-        strcat(buf, tempBuf);
-        eventAction->totalBytesPassed += len;
-        //printf("Received %d bytes\n", len);
-        //send(connfd, buf, len, 0);
+        if ((nread = read(clientfd, tempBuf, nleft)) < 0)
+        {
+            if (errno == EINTR) /* Interrupted by sig handler return */
+            {
+                nread = 0;
+            } /* and call read() again */
+            else if (errno == EWOULDBLOCK || errno == EAGAIN)
+            {
+                break;
+            }
+            else
+            {
+                return true;
+            }
+        }
+        else if (nread == 0)
+        {
+            endOfReading = true;
+            break;
+        } /* EOF */
+        strcat(eventAction->URL, tempBuf);
+        eventAction->totalBytesPassed += nread;
+        nleft -= nread;
     }
-    if (len == 0)
-    {
-        // EOF received.
-        endOfReading = true;
-    }
-    /*else if (errno == EWOULDBLOCK || errno == EAGAIN)
-    {
-        // no more data to read() for now
-        return false;
-    }
-    else
+
+    /*else if (errno != EWOULDBLOCK && errno != EAGAIN)
     {
         perror("error reading");
         return true;
     }*/
-    //When a return value to read() or write() is less than 0 and errno is EAGAIN or EWOULDBLOCK, it is an indicator that you are done for the moment--but you need to know where you should start next time it's your turn
-    else if (errno != EWOULDBLOCK && errno != EAGAIN)
-    {
-        perror("error reading");
-        return true;
-    }
 
-    strcat(eventAction->URL, tempBuf);
+    //strcat(eventAction->URL, buf);
+    printf("Done reading for now\n");
 
     if (endOfReading)
     {
+        strcpy(buf, eventAction->URL);
+        printf("Done reading from client\n");
+
         eventAction->totalDataSize = eventAction->totalBytesPassed;
         eventAction->totalBytesPassed = 0;
         size_t n;
@@ -594,6 +620,9 @@ bool clread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *to
 
         strcat(reqWire, passThroughHeaders);
         strcat(reqWire, "\r\n\r\n");
+        /*char eof = EOF;
+        char *d = &eof;
+        strcat(reqWire, d);*/
 
         printf("'%s'\n", reqWire);
 
@@ -739,67 +768,99 @@ bool srvwrite(event_action *eventAction /*int *clientfd, int *serverfd, size_t *
 {
     int nwritten;
 
+    printf("Inside srvwrite\nData to send is:\n%s\n", eventAction->dataBuf);
     //With I/O multiplexing and non-blocking I/O, you can't loop until you receive (or send) everything; you have to stop when you get an value less than 0 and finish handling the other ready events, after which you will return to the epoll_wait() loop to see if it is ready for more I/O.
     //When a return value to read() or write() is less than 0 and errno is EAGAIN or EWOULDBLOCK, it is a an indicator that you are done for the moment--but you need to know where you should start next time it's your turn (see man pages for accept and read, and search for blocking).
     //write to server from offset in dataBuf noted by totalPassed and add bytes Sent to total passed. If total passed = total data size, reset buf, maxsize and bytespassed in preparation to recieve data from upstream server. remove old epoll event and add reading epoll event. change callback to read from server
     /*if ((nwritten = write(eventAction->serverfd, eventAction->dataBuf[eventAction->totalBytesPassed], eventAction->totalDataSize - eventAction->totalBytesPassed)) <= 0)
     {
         if (errno == EINTR)  Interrupted by sig handler return */
-       /* {
+    /* {
             nwritten = 0;
         }  and call write() again */
-       /* else
+    /* else
         {
             //TODO: insert error message here and return to client.
         }
         //return -1;        errno set by write() */
-   /* }*/
+    /* }*/
 
-   while((nwritten = write(eventAction->serverfd, &eventAction->dataBuf[eventAction->totalBytesPassed], eventAction->totalDataSize - eventAction->totalBytesPassed)) > 0)
-   {
-       eventAction->totalBytesPassed += nwritten;
-   }
+    while ((nwritten = write(eventAction->serverfd, &eventAction->dataBuf[eventAction->totalBytesPassed], eventAction->totalDataSize - eventAction->totalBytesPassed)) > 0)
+    {
+        printf("Writing from %s\n", &eventAction->dataBuf[eventAction->totalBytesPassed]);
+        eventAction->totalBytesPassed += nwritten;
+    }
+
+    printf("done writing\n");
 
     //eventAction->totalBytesPassed += nwritten;
 
     if (eventAction->totalBytesPassed == eventAction->totalDataSize)
     {
+        printf("Writing complete\n");
+
         free(eventAction->dataBuf);
         eventAction->dataBuf = NULL;
         eventAction->totalDataSize = 0;
         eventAction->totalBytesPassed = 0;
-        eventAction->callback = clwrite;
+        eventAction->callback = srvread;
 
         struct epoll_event event;
         event.data.ptr = eventAction;
         // add event to epoll file descriptor
         event.events = EPOLLIN | EPOLLET; //read mode, use edge-triggered monitoring
 
-        if (epoll_ctl(efd, EPOLL_CTL_MOD, eventAction->serverfd, &event) < 0)
+        /*if (epoll_ctl(efd, EPOLL_CTL_MOD, eventAction->serverfd, &event) < 0)
+        {
+            fprintf(stderr, "error adding event\n");
+            //TODO: create error message
+            //exit(1);
+            return true;
+        }*/
+        if(epoll_ctl(efd, EPOLL_CTL_DEL, eventAction->serverfd, NULL))
         {
             fprintf(stderr, "error adding event\n");
             //TODO: create error message
             //exit(1);
             return true;
         }
+        if(epoll_ctl(efd, EPOLL_CTL_ADD, eventAction->serverfd, &event))
+        {
+            fprintf(stderr, "error adding event\n");
+            //TODO: create error message
+            //exit(1);
+            return true;
+        }
+    
+    return false;
+    
     }
-
-    else if (errno != EWOULDBLOCK && errno != EAGAIN)
+    else if(errno != EWOULDBLOCK || errno != EAGAIN)
     {
-        perror("error reading");
+        perror("error writing");
         //TODO: create error mesage and return
         return true;
     }
 
+    /*else if(errno != EWOULDBLOCK && errno != EAGAIN)
+    {
+        perror("error reading");
+        //TODO: create error mesage and return
+        return true;
+    }*/
+
+    printf("About to exit srvwrite\n");
     return false;
 }
 
 bool srvread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *totalBytesPassed, size_t *totalDataSize, unsigned char *dataBuf, char *URL, serviceState *state*/)
 {
-    size_t len;
+    //size_t len;
     char buf[MAXBUF], tempBuf[MAXBUF];
     memset(buf, '\0', MAXBUF);
     bool endOfReading = false;
+    int serverfd = eventAction->serverfd;
+    printf("INside srvread.\n");
 
     //With I/O multiplexing and non-blocking I/O, you can't loop until you receive (or send) everything; you have to stop when you get an value less than 0 and finish handling the other ready events, after which you will return to the epoll_wait() loop to see if it is ready for more I/O.
     //When a return value to read() or write() is less than 0 and errno is EAGAIN or EWOULDBLOCK, it is a an indicator that you are done for the moment--but you need to know where you should start next time it's your turn (see man pages for accept and read, and search for blocking).
@@ -809,7 +870,7 @@ bool srvread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *t
         eventAction->dataBuf = malloc(sizeof(char) * BUFMAX);
     }
 
-    while ((len = recv(eventAction->serverfd, tempBuf, BUFMAX - eventAction->totalBytesPassed, 0)) > 0)
+    /*while ((len = recv(eventAction->serverfd, tempBuf, BUFMAX - eventAction->totalBytesPassed, 0)) > 0)
     {
         strcat(buf, tempBuf);
         eventAction->totalBytesPassed += len;
@@ -820,7 +881,7 @@ bool srvread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *t
     {
         // EOF received.
         endOfReading = true;
-    }
+    }*/
     /*else if (errno == EWOULDBLOCK || errno == EAGAIN)
     {
         // no more data to read() for now
@@ -832,14 +893,44 @@ bool srvread(event_action *eventAction /*int *clientfd, int *serverfd, size_t *t
         return true;
     }*/
     //When a return value to read() or write() is less than 0 and errno is EAGAIN or EWOULDBLOCK, it is an indicator that you are done for the moment--but you need to know where you should start next time it's your turn
-    else if (errno != EWOULDBLOCK && errno != EAGAIN)
+   /* else if (errno != EWOULDBLOCK && errno != EAGAIN)
     {
         perror("error reading");
         //TODO: create error mesage and return
         return true;
     }
 
-    strcat(eventAction->dataBuf, buf);
+    strcat(eventAction->dataBuf, buf);*/
+
+    size_t nleft = BUFMAX;
+    ssize_t nread;
+
+    while (nleft > 0)
+    {
+        if ((nread = read(serverfd, tempBuf, nleft)) < 0)
+        {
+            if (errno == EINTR) /* Interrupted by sig handler return */
+            {
+                nread = 0;
+            } /* and call read() again */
+            else if (errno == EWOULDBLOCK || errno == EAGAIN)
+            {
+                break;
+            }
+            else
+            {
+                return true;
+            }
+        }
+        else if (nread == 0)
+        {
+            endOfReading = true;
+            break;
+        } /* EOF */
+        strcat(eventAction->dataBuf, tempBuf);
+        eventAction->totalBytesPassed += nread;
+        nleft -= nread;
+    }
 
     if (endOfReading)
     {
@@ -984,21 +1075,21 @@ bool clwrite(event_action *eventAction /*int *clientfd, int *serverfd, size_t *t
     /*if ((nwritten = write(eventAction->clientfd, eventAction->dataBuf[eventAction->totalBytesPassed], eventAction->totalDataSize - eventAction->totalBytesPassed)) <= 0)
     {
         if (errno == EINTR) Interrupted by sig handler return */
-        /*{
+    /*{
             nwritten = 0;
         } and call write() again */
-        /*else
+    /*else
         {
             //TODO: insert error message here and return to client.
         }
         //return -1;        errno set by write() */
     //}
-    while((nwritten = write(eventAction->clientfd, &eventAction->dataBuf[eventAction->totalBytesPassed], eventAction->totalDataSize- eventAction->totalBytesPassed)) > 0)
+    while ((nwritten = write(eventAction->clientfd, &eventAction->dataBuf[eventAction->totalBytesPassed], eventAction->totalDataSize - eventAction->totalBytesPassed)) > 0)
     {
         eventAction->totalBytesPassed += nwritten;
     }
 
-    if(eventAction->totalBytesPassed == eventAction->totalDataSize)
+    if (eventAction->totalBytesPassed == eventAction->totalDataSize)
     {
         return true;
     }
